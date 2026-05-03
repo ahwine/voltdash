@@ -9,17 +9,26 @@ public class PlayerMovement : MonoBehaviour
     private float moveInput;
     private Rigidbody2D rb;
     private bool isGrounded;
+    private bool wasGrounded;
+
+    [Header("Double Jump")]
+    public int maxJumps = 2;
+    private int jumpsRemaining;
 
     [Header("Pengecekan Tanah")]
     public Transform groundCheck;
-    public float checkRadius = 0.2f;
+    public float checkRadius = 0.22f;
     public LayerMask groundLayer;
 
     [Header("Tembak")]
     public Transform firePoint;
     public GameObject bulletPrefab;
     public float bulletSpeed = 20f;
-    
+
+    [Header("VFX Double Jump")]
+    public GameObject doubleJumpSplashPrefab;
+    public Transform jumpEffectPoint;
+
     [Header("Ammo System")]
     public int maxAmmo = 6;
     private int currentAmmo;
@@ -27,144 +36,229 @@ public class PlayerMovement : MonoBehaviour
     public float reloadDelay = 1.5f;
     private bool canShoot = true;
     private bool isReloading = false;
-    
+
     [Header("UI")]
     public TextMeshProUGUI ammoText;
+
+    private Vector3 baseScale;
+    private Animator animator;
+    private Coroutine autoReloadRoutine;
 
     void Start()
     {
         rb = GetComponent<Rigidbody2D>();
+        animator = GetComponent<Animator>();
+
         currentAmmo = maxAmmo;
+        jumpsRemaining = maxJumps;
+        baseScale = transform.localScale;
+
         UpdateAmmoUI();
     }
 
     void Update()
     {
-        // Ground Check
         isGrounded = Physics2D.OverlapCircle(groundCheck.position, checkRadius, groundLayer);
 
-        // Movement Horizontal
-        moveInput = Input.GetAxisRaw("Horizontal");
-        rb.velocity = new Vector2(moveInput * moveSpeed, rb.velocity.y);
-
-        // Flip Sprite (hanya jika ada input horizontal)
-        if (moveInput > 0)
-            transform.localScale = new Vector3(1, 1, 1);
-        else if (moveInput < 0)
-            transform.localScale = new Vector3(-1, 1, 1);
-
-        // Jump
-        if (Input.GetButtonDown("Jump") && isGrounded)
+        if (isGrounded && !wasGrounded)
         {
-            rb.velocity = new Vector2(rb.velocity.x, jumpForce);
+            jumpsRemaining = maxJumps;
         }
 
-        // Shoot
+        moveInput = Input.GetAxisRaw("Horizontal");
+
+        if (animator != null)
+            animator.SetFloat("Speed", Mathf.Abs(moveInput));
+
+        rb.velocity = new Vector2(moveInput * moveSpeed, rb.velocity.y);
+
+        if (moveInput > 0)
+            transform.localScale = new Vector3(Mathf.Abs(baseScale.x), baseScale.y, baseScale.z);
+        else if (moveInput < 0)
+            transform.localScale = new Vector3(-Mathf.Abs(baseScale.x), baseScale.y, baseScale.z);
+
+        if (Input.GetButtonDown("Jump") && jumpsRemaining > 0)
+        {
+            bool isDoubleJump = !isGrounded;
+
+            rb.velocity = new Vector2(rb.velocity.x, jumpForce);
+            jumpsRemaining--;
+
+            if (isDoubleJump)
+            {
+                SpawnDoubleJumpSplash();
+            }
+        }
+
         if (Input.GetMouseButtonDown(0) && canShoot && !isReloading)
         {
             if (currentAmmo > 0)
-            {
                 Shoot();
-            }
             else
-            {
-                StartCoroutine(Reload());
-            }
+                StartManualReload();
         }
-        
-        // Reload Manual (R)
+
         if (Input.GetKeyDown(KeyCode.R) && !isReloading && currentAmmo < maxAmmo)
         {
-            StartCoroutine(Reload());
+            StartManualReload();
         }
+
+        wasGrounded = isGrounded;
+    }
+
+    void SpawnDoubleJumpSplash()
+    {
+        if (doubleJumpSplashPrefab == null)
+            return;
+
+        Vector3 spawnPosition;
+
+        if (jumpEffectPoint != null)
+            spawnPosition = jumpEffectPoint.position;
+        else if (groundCheck != null)
+            spawnPosition = groundCheck.position;
+        else
+            spawnPosition = transform.position;
+
+        GameObject splash = Instantiate(doubleJumpSplashPrefab, spawnPosition, Quaternion.identity);
+
+        Vector3 splashScale = splash.transform.localScale;
+        splashScale.x = Mathf.Abs(splashScale.x) * (transform.localScale.x > 0 ? 1 : -1);
+        splash.transform.localScale = splashScale;
     }
 
     void Shoot()
     {
         canShoot = false;
-        
-        // Tentukan arah tembak berdasarkan WASD
+
+        if (animator != null)
+            animator.SetTrigger("Shoot");
+
         Vector2 shootDirection = GetShootDirection();
-        
-        // Buat peluru
+
         GameObject bullet = Instantiate(bulletPrefab, firePoint.position, Quaternion.identity);
         Rigidbody2D rbBullet = bullet.GetComponent<Rigidbody2D>();
-        
+
         if (rbBullet != null)
         {
             rbBullet.velocity = shootDirection * bulletSpeed;
-            
-            // Rotasi peluru menghadap arah gerak
+
             float angle = Mathf.Atan2(shootDirection.y, shootDirection.x) * Mathf.Rad2Deg;
             bullet.transform.rotation = Quaternion.Euler(0, 0, angle);
         }
-        
+
         currentAmmo--;
         UpdateAmmoUI();
-        
-        Debug.Log("Tembak ke arah: " + shootDirection + " | Sisa ammo: " + currentAmmo);
-        
-        // Delay sebelum bisa tembak lagi
-        Invoke("ResetShoot", shootDelay);
-        
-        // Auto reload jika ammo habis
+
+        Invoke(nameof(ResetShoot), shootDelay);
+
         if (currentAmmo == 0)
         {
-            StartCoroutine(Reload());
+            if (autoReloadRoutine != null)
+                StopCoroutine(autoReloadRoutine);
+
+            autoReloadRoutine = StartCoroutine(AutoReloadAfterLastShot());
         }
+    }
+
+    System.Collections.IEnumerator AutoReloadAfterLastShot()
+    {
+        yield return new WaitForSeconds(shootDelay);
+
+        if (!isReloading && currentAmmo == 0)
+        {
+            yield return StartCoroutine(Reload());
+        }
+
+        autoReloadRoutine = null;
+    }
+
+    void StartManualReload()
+    {
+        if (autoReloadRoutine != null)
+        {
+            StopCoroutine(autoReloadRoutine);
+            autoReloadRoutine = null;
+        }
+
+        StartCoroutine(Reload());
     }
 
     Vector2 GetShootDirection()
     {
-        float horizontal = 0f;
-        float vertical = 0f;
-        
-        // Deteksi input WASD
-        if (Input.GetKey(KeyCode.W)) vertical = 1f;
-        if (Input.GetKey(KeyCode.S)) vertical = -1f;
-        if (Input.GetKey(KeyCode.D)) horizontal = 1f;
-        if (Input.GetKey(KeyCode.A)) horizontal = -1f;
-        
-        // Jika tidak ada input WASD, gunakan arah hadap Volt
-        if (horizontal == 0 && vertical == 0)
+        float h = 0f;
+        float v = 0f;
+
+        if (Input.GetKey(KeyCode.W)) v = 1f;
+        if (Input.GetKey(KeyCode.S)) v = -1f;
+        if (Input.GetKey(KeyCode.D)) h = 1f;
+        if (Input.GetKey(KeyCode.A)) h = -1f;
+
+        if (h == 0 && v == 0)
         {
-            horizontal = transform.localScale.x > 0 ? 1f : -1f;
-            vertical = 0f;
+            h = transform.localScale.x > 0 ? 1f : -1f;
+            v = 0f;
         }
-        
-        // Normalisasi agar diagonal tidak lebih cepat
-        Vector2 direction = new Vector2(horizontal, vertical).normalized;
-        
-        return direction;
+
+        return new Vector2(h, v).normalized;
     }
 
     void ResetShoot()
     {
-        canShoot = true;
+        if (!isReloading)
+            canShoot = true;
     }
 
     System.Collections.IEnumerator Reload()
     {
+        if (isReloading)
+            yield break;
+
         isReloading = true;
         canShoot = false;
-        
-        Debug.Log("RELOADING...");
+
+        if (animator != null)
+        {
+            animator.ResetTrigger("Shoot");
+            animator.SetTrigger("Reload");
+        }
+
         if (ammoText != null)
             ammoText.text = "RELOADING...";
-        
+
         yield return new WaitForSeconds(reloadDelay);
-        
+
         currentAmmo = maxAmmo;
         isReloading = false;
         canShoot = true;
-        
+
         UpdateAmmoUI();
-        Debug.Log("Reload selesai. Ammo: " + currentAmmo);
     }
 
     void UpdateAmmoUI()
     {
         if (ammoText != null)
             ammoText.text = "Ammo: " + currentAmmo + " / " + maxAmmo;
+    }
+
+    void OnDrawGizmosSelected()
+    {
+        if (groundCheck != null)
+        {
+            Gizmos.color = Color.yellow;
+            Gizmos.DrawWireSphere(groundCheck.position, checkRadius);
+        }
+
+        if (firePoint != null)
+        {
+            Gizmos.color = Color.red;
+            Gizmos.DrawSphere(firePoint.position, 0.04f);
+        }
+
+        if (jumpEffectPoint != null)
+        {
+            Gizmos.color = Color.cyan;
+            Gizmos.DrawSphere(jumpEffectPoint.position, 0.05f);
+        }
     }
 }

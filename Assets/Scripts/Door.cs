@@ -4,13 +4,13 @@ public class Door : MonoBehaviour
 {
     public GameObject winPanel;
     private SpriteRenderer sr;
-    
+
     void Start()
     {
         sr = GetComponent<SpriteRenderer>();
         sr.color = Color.red;
     }
-    
+
     void Update()
     {
         if (DataCore.isCollected)
@@ -18,24 +18,41 @@ public class Door : MonoBehaviour
             sr.color = Color.green;
         }
     }
-    
+
     void OnCollisionEnter2D(Collision2D collision)
     {
-        if (collision.gameObject.CompareTag("Player"))
+        if (!collision.gameObject.CompareTag("Player"))
+            return;
+
+        if (DataCore.isCollected)
         {
-            if (DataCore.isCollected)
+            GameObject player = collision.gameObject;
+
+            Rigidbody2D rb = player.GetComponent<Rigidbody2D>();
+            if (rb != null)
             {
-                if (winPanel != null)
-                {
-                    winPanel.SetActive(true);
-                    Time.timeScale = 0;
-                }
-                Debug.Log("LEVEL COMPLETE!");
+                rb.velocity = Vector2.zero;
+                rb.angularVelocity = 0f;
+                rb.constraints = RigidbodyConstraints2D.FreezeAll;
             }
-            else
+
+            PlayerMovement pm = player.GetComponent<PlayerMovement>();
+            if (pm != null)
             {
-                Debug.Log("Pintu terkunci! Cari Data Core dulu.");
+                pm.enabled = false;
             }
+
+            if (winPanel != null)
+            {
+                winPanel.SetActive(true);
+                Time.timeScale = 0f;
+            }
+
+            Debug.Log("LEVEL COMPLETE!");
+        }
+        else
+        {
+            Debug.Log("Pintu terkunci! Cari Data Core dulu.");
         }
     }
 }

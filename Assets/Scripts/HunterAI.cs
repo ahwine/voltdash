@@ -1,211 +1,346 @@
 using UnityEngine;
+using System.Collections;
 
 public class HunterAI : MonoBehaviour
 {
     [Header("Patrol")]
     public float patrolSpeed = 2f;
     public float chaseSpeed = 4f;
-    public float patrolDistance = 3f;
+    public float minPatrolDistance = 1.2f;
+    public float maxPatrolDistance = 3.5f;
+    public float minIdleTime = 0.5f;
+    public float maxIdleTime = 1.2f;
+    [Range(0f, 1f)] public float flipChanceAfterIdle = 0.6f;
+
+    [Header("Checks")]
     public Transform groundCheck;
     public Transform wallCheck;
-    public float checkDistance = 1f;
+    public Transform hazardCheck;
+    public float checkRadius = 0.12f;
     public LayerMask groundLayer;
-    
+    public LayerMask hazardLayer;
+
     [Header("Detection")]
-    public float detectionRange = 3f;
-    public float loseDetectionRange = 5f;
-    public float attackRange = 1f;
-    
-    [Header("Combat")]
+    public float detectionRange = 5f;
+    public float loseDetectionRange = 8f;
+
+    [Header("Attack To Volt")]
+    public int contactDamage = 1;
+    public float attackCooldown = 0.7f;
+
+    [Header("Health")]
     public int maxHealth = 2;
-    private int currentHealth;
-    private int damage = 1;
-    
+
+    [Header("Hit FX")]
+    public float hitFlashDuration = 0.12f;
+    public Color hitFlashColor = Color.red;
+
     private Rigidbody2D rb;
     private SpriteRenderer sr;
     private Transform player;
-    private Vector3 startPosition;
-    
-    private enum State { Patrol, Chase, ReturnToStart }
-    private State currentState = State.Patrol;
+
+    private int currentHealth;
+    private int moveDirection = -1;
+
+    private float targetVelocityX = 0f;
+    private float idleTimer = 0f;
+    private float patrolTargetDistance = 0f;
+    private float patrolStartX = 0f;
+    private float nextAttackTime = 0f;
+
     private bool isDead = false;
-    private bool facingRight = true;
-    
+    private bool isIdle = false;
+    private bool isChasing = false;
+    private bool mustFlipAfterIdle = false;
+
     private Color originalColor;
-    
-    // FITUR BARU: Agressive mode saat kena tembak
-    private bool isAggressive = false;
 
     void Start()
     {
         rb = GetComponent<Rigidbody2D>();
         sr = GetComponent<SpriteRenderer>();
-        player = GameObject.FindGameObjectWithTag("Player").transform;
-        startPosition = transform.position;
+
+        if (sr != null)
+            originalColor = sr.color;
+
         currentHealth = maxHealth;
-        originalColor = sr.color;
-        facingRight = true;
+
+        FindPlayer();
+
+        moveDirection = Random.value < 0.5f ? -1 : 1;
+        ApplyFacing();
+
+        StartIdle(false);
     }
 
     void Update()
     {
         if (isDead) return;
-        
+
+        if (player == null)
+            FindPlayer();
+
+        HandleState();
+    }
+
+    void FixedUpdate()
+    {
+        if (isDead || rb == null) return;
+
+        rb.velocity = new Vector2(targetVelocityX, rb.velocity.y);
+    }
+
+    void FindPlayer()
+    {
+        GameObject playerObj = GameObject.FindGameObjectWithTag("Player");
+        if (playerObj != null)
+            player = playerObj.transform;
+    }
+
+    void HandleState()
+    {
+        if (player == null)
+        {
+            HandlePatrol();
+            return;
+        }
+
         float distanceToPlayer = Vector2.Distance(transform.position, player.position);
-        
-        switch (currentState)
+
+        bool detectNow = distanceToPlayer <= detectionRange;
+        bool keepChasing = isChasing && distanceToPlayer <= loseDetectionRange;
+
+        if (detectNow || keepChasing)
         {
-            case State.Patrol:
-                Patrol();
-                if (distanceToPlayer <= detectionRange || isAggressive)
-                {
-                    currentState = State.Chase;
-                }
-                break;
-                
-            case State.Chase:
-                ChasePlayer(distanceToPlayer);
-                if (distanceToPlayer > loseDetectionRange && !isAggressive)
-                {
-                    currentState = State.ReturnToStart;
-                }
-                break;
-                
-            case State.ReturnToStart:
-                ReturnToStart();
-                if (Mathf.Abs(transform.position.x - startPosition.x) < 0.5f)
-                {
-                    currentState = State.Patrol;
-                    isAggressive = false; // Reset aggressive saat kembali
-                }
-                if (distanceToPlayer <= detectionRange || isAggressive)
-                {
-                    currentState = State.Chase;
-                }
-                break;
+            isChasing = true;
+            HandleChase();
+            return;
+        }
+
+        if (isChasing)
+        {
+            isChasing = false;
+            StartIdle(true);
+        }
+
+        HandlePatrol();
+    }
+
+    void HandlePatrol()
+    {
+        if (isIdle)
+        {
+            targetVelocityX = 0f;
+            idleTimer -= Time.deltaTime;
+
+            if (idleTimer <= 0f)
+            {
+                if (mustFlipAfterIdle || Random.value < flipChanceAfterIdle)
+                    Flip();
+
+                StartPatrol();
+            }
+
+            return;
+        }
+
+        if (!CanMoveForward())
+        {
+            StartIdle(true);
+            return;
+        }
+
+        targetVelocityX = patrolSpeed * moveDirection;
+
+        float traveled = Mathf.Abs(transform.position.x - patrolStartX);
+        if (traveled >= patrolTargetDistance)
+        {
+            StartIdle(false);
         }
     }
 
-    void Patrol()
+    void HandleChase()
     {
-        float distanceFromStart = transform.position.x - startPosition.x;
-        
-        if (Mathf.Abs(distanceFromStart) >= patrolDistance)
-            Flip();
-        
-        bool groundAhead = Physics2D.Raycast(groundCheck.position, Vector2.down, checkDistance, groundLayer);
-        bool wallAhead = Physics2D.Raycast(wallCheck.position, Vector2.right * (facingRight ? 1 : -1), 0.3f, groundLayer);
-        
-        if (!groundAhead || wallAhead)
-            Flip();
-        
-        rb.velocity = new Vector2(patrolSpeed * (facingRight ? 1 : -1), rb.velocity.y);
+        if (player == null)
+        {
+            isChasing = false;
+            StartIdle(false);
+            return;
+        }
+
+        float dx = player.position.x - transform.position.x;
+
+        if (Mathf.Abs(dx) < 0.2f)
+        {
+            targetVelocityX = 0f;
+            return;
+        }
+
+        int chaseDir = dx >= 0 ? 1 : -1;
+
+        if (chaseDir != moveDirection)
+        {
+            moveDirection = chaseDir;
+            ApplyFacing();
+        }
+
+        if (!CanMoveForward())
+        {
+            isChasing = false;
+            StartIdle(true);
+            return;
+        }
+
+        targetVelocityX = chaseSpeed * moveDirection;
     }
 
-    void ChasePlayer(float distanceToPlayer)
+    bool CanMoveForward()
     {
-        if (player.position.x > transform.position.x)
-        {
-            facingRight = true;
-            transform.localScale = new Vector3(1, 1, 1);
-        }
-        else
-        {
-            facingRight = false;
-            transform.localScale = new Vector3(-1, 1, 1);
-        }
-        
-        if (distanceToPlayer > attackRange)
-        {
-            Vector2 direction = (player.position - transform.position).normalized;
-            rb.velocity = new Vector2(direction.x * chaseSpeed, rb.velocity.y);
-        }
-        else
-        {
-            rb.velocity = new Vector2(0, rb.velocity.y);
-        }
+        bool hasGroundAhead = true;
+        bool wallAhead = false;
+        bool hazardAhead = false;
+
+        if (groundCheck != null)
+            hasGroundAhead = Physics2D.OverlapCircle(groundCheck.position, checkRadius, groundLayer);
+
+        if (wallCheck != null)
+            wallAhead = Physics2D.OverlapCircle(wallCheck.position, checkRadius, groundLayer);
+
+        if (hazardCheck != null)
+            hazardAhead = Physics2D.OverlapCircle(hazardCheck.position, checkRadius, hazardLayer);
+
+        return hasGroundAhead && !wallAhead && !hazardAhead;
     }
 
-    void ReturnToStart()
+    void StartPatrol()
     {
-        if (startPosition.x > transform.position.x)
-        {
-            facingRight = true;
-            transform.localScale = new Vector3(1, 1, 1);
-        }
-        else
-        {
-            facingRight = false;
-            transform.localScale = new Vector3(-1, 1, 1);
-        }
-        
-        Vector2 direction = (startPosition - transform.position).normalized;
-        rb.velocity = new Vector2(direction.x * patrolSpeed, rb.velocity.y);
+        isIdle = false;
+        mustFlipAfterIdle = false;
+
+        patrolTargetDistance = Random.Range(minPatrolDistance, maxPatrolDistance);
+        patrolStartX = transform.position.x;
+    }
+
+    void StartIdle(bool forceFlip)
+    {
+        isIdle = true;
+        mustFlipAfterIdle = forceFlip;
+        idleTimer = Random.Range(minIdleTime, maxIdleTime);
+        targetVelocityX = 0f;
     }
 
     void Flip()
     {
-        facingRight = !facingRight;
+        moveDirection *= -1;
+        ApplyFacing();
+    }
+
+    void ApplyFacing()
+    {
         Vector3 scale = transform.localScale;
-        scale.x *= -1;
+        scale.x = Mathf.Abs(scale.x) * moveDirection;
         transform.localScale = scale;
     }
 
-    public void TakeDamage(int damageAmount)
+    public void TakeDamage(int damage)
     {
-        currentHealth -= damageAmount;
-        StartCoroutine(FlashRed());
-        
-        // FITUR BARU: Saat kena tembak, langsung agresif
-        isAggressive = true;
-        currentState = State.Chase;
-        
-        Debug.Log("Hunter terkena hit! Sisa HP: " + currentHealth + " | Mode Agresif AKTIF");
-        
+        if (isDead) return;
+
+        currentHealth -= damage;
+
+        if (player != null)
+        {
+            float dx = player.position.x - transform.position.x;
+
+            if (Mathf.Abs(dx) > 0.1f)
+            {
+                moveDirection = dx >= 0 ? 1 : -1;
+                ApplyFacing();
+            }
+
+            isChasing = true;
+        }
+
+        if (sr != null)
+            StartCoroutine(HitFlash());
+
         if (currentHealth <= 0)
+        {
             Die();
+        }
     }
 
-    System.Collections.IEnumerator FlashRed()
+    IEnumerator HitFlash()
     {
-        sr.color = Color.red;
-        yield return new WaitForSeconds(0.1f);
-        sr.color = originalColor;
+        if (sr == null) yield break;
+
+        sr.color = hitFlashColor;
+        yield return new WaitForSeconds(hitFlashDuration);
+
+        if (sr != null)
+            sr.color = originalColor;
     }
 
     void Die()
     {
+        if (isDead) return;
+
         isDead = true;
-        currentState = State.Patrol;
-        sr.enabled = false;
-        GetComponent<Collider2D>().enabled = false;
-        rb.velocity = Vector2.zero;
-        rb.simulated = false;
-        Debug.Log("Hunter mati permanen.");
+        targetVelocityX = 0f;
+
+        Destroy(gameObject);
     }
 
     void OnCollisionStay2D(Collision2D collision)
     {
         if (isDead) return;
-        
-        if (collision.gameObject.CompareTag("Player"))
+        if (Time.time < nextAttackTime) return;
+
+        if (collision.collider.CompareTag("Player"))
         {
-            PlayerHealth ph = collision.gameObject.GetComponent<PlayerHealth>();
+            PlayerHealth ph = collision.collider.GetComponent<PlayerHealth>();
             if (ph != null)
             {
-                ph.TakeDamage(damage);
-                Debug.Log("Hunter menyentuh Volt! Damage langsung.");
+                ph.TakeDamage(contactDamage, (Vector2)transform.position);
+                nextAttackTime = Time.time + attackCooldown;
+            }
+        }
+    }
+
+    void OnTriggerStay2D(Collider2D other)
+    {
+        if (isDead) return;
+        if (Time.time < nextAttackTime) return;
+
+        if (other.CompareTag("Player"))
+        {
+            PlayerHealth ph = other.GetComponent<PlayerHealth>();
+            if (ph != null)
+            {
+                ph.TakeDamage(contactDamage, (Vector2)transform.position);
+                nextAttackTime = Time.time + attackCooldown;
             }
         }
     }
 
     void OnDrawGizmosSelected()
     {
-        Gizmos.color = Color.yellow;
-        Gizmos.DrawWireSphere(transform.position, detectionRange);
-        Gizmos.color = Color.blue;
-        Gizmos.DrawWireSphere(transform.position, loseDetectionRange);
-        Gizmos.color = Color.red;
-        Gizmos.DrawWireSphere(transform.position, attackRange);
+        if (groundCheck != null)
+        {
+            Gizmos.color = Color.yellow;
+            Gizmos.DrawWireSphere(groundCheck.position, checkRadius);
+        }
+
+        if (wallCheck != null)
+        {
+            Gizmos.color = Color.cyan;
+            Gizmos.DrawWireSphere(wallCheck.position, checkRadius);
+        }
+
+        if (hazardCheck != null)
+        {
+            Gizmos.color = Color.red;
+            Gizmos.DrawWireSphere(hazardCheck.position, checkRadius);
+        }
     }
 }
